@@ -1,0 +1,17 @@
+/* Conservative raster cleanup and shared-boundary coverage estimation. */
+(function(root){'use strict';
+function clean(image){const {width:w,height:h,data:d}=image,out=new Uint8ClampedArray(d);let changed=0;
+ // Range-limited filtering leaves strong edges, alpha and isolated high-contrast details intact.
+ for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=(y*w+x)*4;if(d[i+3]!==255)continue;let sum=[0,0,0],weight=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const j=((y+dy)*w+x+dx)*4;if(d[j+3]!==255)continue;const delta=Math.max(...[0,1,2].map(c=>Math.abs(d[j+c]-d[i+c])));if(delta>18)continue;const k=(dx===0&&dy===0?4:1)*(1-delta/19);weight+=k;for(let c=0;c<3;c++)sum[c]+=d[j+c]*k;}for(let c=0;c<3;c++){const v=Math.round(sum[c]/weight);out[i+c]=v;if(v!==d[i+c])changed++;}}
+ return {image:{width:w,height:h,data:out},changed};}
+function sampler(image,settings){const {width:w,height:h,data:d}=image,bg=(settings.background||'#ffffff').match(/\w\w/g).map(v=>parseInt(v,16));return (x,y)=>{x=Math.max(0,Math.min(w-1,x-.5));y=Math.max(0,Math.min(h-1,y-.5));const ix=Math.floor(x),iy=Math.floor(y),fx=x-ix,fy=y-iy,result=[0,0,0,0];for(const [xx,yy,k] of [[ix,iy,(1-fx)*(1-fy)],[Math.min(ix+1,w-1),iy,fx*(1-fy)],[ix,Math.min(iy+1,h-1),(1-fx)*fy],[Math.min(ix+1,w-1),Math.min(iy+1,h-1),fx*fy]]){const i=(yy*w+xx)*4,a=d[i+3]/255;for(let c=0;c<3;c++)result[c]+=k*(d[i+c]*a+(settings.alpha==='cutout'?0:bg[c]*(1-a)));result[3]+=k*(settings.alpha==='cutout'?d[i+3]:255);}return result;};}
+function context(image,settings,palette){return {sample:sampler(image,settings),settings,palette,moved:0,tested:0};}
+function adjust(points,right,left,faces,ctx,locked){if(!ctx||right<0||left<0)return points;const a=ctx.palette[faces[right].color],b=ctx.palette[faces[left].color],vec=c=>[c.r*c.a/255,c.g*c.a/255,c.b*c.a/255,c.a],av=vec(a),bv=vec(b),delta=av.map((v,i)=>v-bv[i]),norm=delta.reduce((s,v)=>s+v*v,0);if(norm<1600)return points;
+ const closed=points[0][0]===points.at(-1)[0]&&points[0][1]===points.at(-1)[1],n=closed?points.length-1:points.length;
+ const project=p=>{const t=delta.reduce((s,v,i)=>s+(p[i]-bv[i])*v,0)/norm,residual=Math.sqrt(p.reduce((s,v,i)=>s+(v-bv[i]-t*delta[i])**2,0));return {t,residual};};
+ const output=points.map(p=>p.slice());for(let i=0;i<n;i++){if((!closed||locked)&&(i<2||i>=n-2))continue;const p=points[i];if(p[0]<=0||p[1]<=0)continue;const prev=points[(i-2+n)%n],next=points[(i+2)%n],dx=next[0]-prev[0],dy=next[1]-prev[1],len=Math.hypot(dx,dy);if(!len)continue;const nx=-dy/len,ny=dx/len;const lo=project(ctx.sample(p[0]-nx*.8,p[1]-ny*.8)),hi=project(ctx.sample(p[0]+nx*.8,p[1]+ny*.8));ctx.tested++;if(Math.abs(hi.t-lo.t)<.35||Math.max(lo.residual,hi.residual)>24)continue;
+ let l=-.8,r=.8;const target=(a.a===0||b.a===0)?(a.a===0?1-ctx.settings.threshold/255:ctx.settings.threshold/255):ctx.settings.mode==='mono'?((ctx.settings.monoThreshold||128)-(.2126*b.r+.7152*b.g+.0722*b.b))/(.2126*(a.r-b.r)+.7152*(a.g-b.g)+.0722*(a.b-b.b)):.5;if((lo.t-target)*(hi.t-target)>0)continue;
+ for(let k=0;k<12;k++){const m=(l+r)/2,t=project(ctx.sample(p[0]+nx*m,p[1]+ny*m)).t;if((t<target)===(lo.t<target))l=m;else r=m;}const shift=(l+r)/2;if(Math.abs(shift)>.65)continue;output[i]=[p[0]+nx*shift,p[1]+ny*shift];if(Math.abs(shift)>.01)ctx.moved++;}
+ if(closed)output[output.length-1]=output[0].slice();return output;}
+root.Subpixel={clean,context,adjust};if(typeof module!=='undefined')module.exports=root.Subpixel;
+})(typeof self!=='undefined'?self:globalThis);
